@@ -1,8 +1,10 @@
+
 // server.js
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+//import serverless from "@vendia/serverless-express";
 
 dotenv.config();
 
@@ -10,18 +12,71 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// Función reutilizable para insertar/actualizar usuarios en Supabase
+async function handleUserUpsert({
+  projectId,
+  userData,
+  tableName,
+  conflictKey = "UserId"
+}) {
+  // Obtener credenciales del proyecto desde la tabla central
+  const { data: project, error: projError } = await supabaseAdmin
+    .from("Tproyects")
+    .select("ProyectURL, ProyectServiceRole")
+    .eq("ProyectId", projectId)
+    .single();
+
+  if (projError || !project) {
+    throw new Error("Proyecto no encontrado");
+  }
+  //conectar al supabase de ese proyecto
+  const supabase = createClient(project.ProyectURL, project.ProyectServiceRole);
+
+  // Buscar usuario en Auth
+  const { data: listResult } = await supabase.auth.admin.listUsers();
+  const correoKey = userData.correoElectronico || userData.Email || userData.correo;;
+  let authUser = listResult.users.find(u => u.email === correoKey);
+  let authUserId;
+
+  if (!authUser) {
+    const { data: newUser, error: createError } = await supabase.auth.admin.createUser({
+      email: correoKey,
+      password: "Temp123!",
+      email_confirm: true,
+    });
+    if (createError) throw createError;
+    authUserId = newUser.user.id;
+  } else {
+    authUserId = authUser.id;
+    await supabase.auth.admin.updateUserById(authUserId, { password: "Temp123!" });
+  }
+
+  // Hacer upsert con el usuario en la tabla correspondiente
+  const upsertPayload = {
+    [conflictKey]: authUserId,
+    ...userData
+  };
+
+  const { error: dbError } = await supabase
+    .from(tableName)
+    .upsert([upsertPayload], { onConflict: [conflictKey] });
+
+  if (dbError) throw dbError;
+
+  return { userId: authUserId };
+}
+
+// Ruta base
 app.get("/", async (_req, res) => {
   console.log("🔍 GET / recibida");
   console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
   console.log("SERVICE_ROLE_KEY:", process.env.SUPABASE_SERVICE_ROLE_KEY?.slice(0,10) + "…");
 
-  // Prueba de query real:
   const { data, error } = await supabaseAdmin
     .from("Tproyects")
     .select("*");
@@ -34,7 +89,7 @@ app.get("/", async (_req, res) => {
   res.send("🚀 Objetiva Server está corriendo");
 });
 
-
+// Ruta para la primera base de datos
 app.put("/upsert-user/:projectId", async (req, res) => {
   const { projectId } = req.params;
   const {
@@ -43,7 +98,48 @@ app.put("/upsert-user/:projectId", async (req, res) => {
     Phone,
     CompanyId,
     RoleId,
-    Area    // asegúrate de que este campo viene como array o null
+    Area
+  } = req.body;
+
+  if (!email || !projectId) {
+    return res.status(400).json({ error: "Faltan datos requeridos." });
+  }
+  //la tabla para el sistema ModeloObjetiva
+  try {
+    const result = await handleUserUpsert({
+      projectId,
+      tableName: "TUser",
+      conflictKey: "UserId",
+      userData: {
+        Email: email,
+        NameUser,
+        Phone,
+        CompanyId,
+        RoleId,
+        Area,
+      }
+    });
+
+    res.status(200).json({
+      ...result,
+      message: "Usuario creado/actualizado (TUser)."
+    });
+
+  } catch (err) {
+    console.error("❌ Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ruta para actualizar o crear usuarios de la segunda base de datos CRM (estructura alternativa)
+app.put("/upsert-user-alt/:projectId", async (req, res) => {
+  const { projectId } = req.params;
+  const {
+    correoElectronico:email,
+    nombreCompleto,
+    celular,
+    empresa,
+    rol
   } = req.body;
 
   if (!email || !projectId) {
@@ -51,7 +147,41 @@ app.put("/upsert-user/:projectId", async (req, res) => {
   }
 
   try {
-    // 1) Recuperar credenciales del proyecto
+    const result = await handleUserUpsert({
+      projectId,
+      tableName: "users",       // nombre de la tabla en segunda BD
+      conflictKey: "id",   // PK en la segunda BD
+      userData: {
+        correoElectronico:email,
+        nombreCompleto,
+        celular,
+        empresa,
+        rol
+      }
+    });
+
+    res.status(200).json({
+      ...result,
+      message: "Usuario creado/actualizado (TUserAlt)."
+    });
+
+  } catch (err) {
+    console.error("❌ Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ruta para eliminar datos de base de datos CRM
+app.delete("/delete-user-alt/:projectId", async (req, res) => {
+  const { projectId } = req.params;
+  const { correoElectronico } = req.body;
+
+  if (!correoElectronico || !projectId) {
+    return res.status(400).json({ error: "Faltan datos requeridos." });
+  }
+
+  try {
+    // Buscar el proyecto correspondiente
     const { data: project, error: projError } = await supabaseAdmin
       .from("Tproyects")
       .select("ProyectURL, ProyectServiceRole")
@@ -59,65 +189,42 @@ app.put("/upsert-user/:projectId", async (req, res) => {
       .single();
 
     if (projError || !project) {
-      return res.status(404).json({ error: "Proyecto no encontrado" });
+      return res.status(404).json({ error: "Proyecto no encontrado." });
     }
 
-    // 2) Conectar al Supabase de ese proyecto
-    const supabase = createClient(
-      project.ProyectURL,
-      project.ProyectServiceRole
-    );
+    const supabase = createClient(project.ProyectURL, project.ProyectServiceRole);
 
-    // 3) Crear o actualizar en Auth
-    const { data: listResult } = await supabase.auth.admin.listUsers();
-    let authUser = listResult.users.find(u => u.email === email);
-    let authUserId;
+    // Buscar el usuario en Auth
+    const { data: listResult, error: listError } = await supabase.auth.admin.listUsers();
+    if (listError) throw listError;
 
-    if (!authUser) {
-      // crear nuevo
-      const { data: newUser, error: createError } = await supabase.auth.admin.createUser({
-        email,
-        password: "Temp123!",
-        email_confirm: true,
-      });
-      if (createError) throw createError;
-      authUserId = newUser.user.id;
-    } else {
-      // ya existe, solo actualizo pwd
-      authUserId = authUser.id;
-      await supabase.auth.admin.updateUserById(authUserId, { password: "Temp123!" });
+    const user = listResult.users.find(u => u.email === correoElectronico);
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado en Auth." });
     }
 
-    // 4) Upsert en la tabla interna TUser
-    //    OJO: la PK es UserId y tu campo de correo en la tabla se llama Email
+    const userId = user.id;
+
+    // Eliminar de tabla de usuarios
     const { error: dbError } = await supabase
-      .from("TUser")
-      .upsert(
-        [
-          {
-            UserId:  authUserId,  // coincidencia con la columna PK
-            Email:   email,       // coincidente con la columna Email
-            NameUser,
-            Phone,
-            RoleId,
-            CompanyId,
-            Area,
-          },
-        ],
-        { onConflict: ["UserId"] }
-      );
-  
+      .from("users")
+      .delete()
+      .eq("id", userId);
 
     if (dbError) throw dbError;
 
-    res.status(200).json({
-      userId: authUserId,
-      message: "Usuario creado/actualizado con contraseña temporal 'Temp123!'"
-    });
+    // Eliminar de Auth
+    const { error: authError } = await supabase.auth.admin.deleteUser(userId);
+    if (authError) throw authError;
+
+    res.status(200).json({ message: "Usuario eliminado correctamente." });
+
   } catch (err) {
-    console.error("❌ Exception capturada:", err);
+    console.error("❌ Error al eliminar:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+
 export default app;
+
