@@ -171,60 +171,47 @@ app.put("/upsert-user-alt/:projectId", async (req, res) => {
   }
 });
 
-// Ruta para eliminar datos de base de datos CRM
-app.delete("/delete-user-alt/:projectId", async (req, res) => {
-  const { projectId } = req.params;
-  const { correoElectronico } = req.body;
-
-  if (!correoElectronico || !projectId) {
-    return res.status(400).json({ error: "Faltan datos requeridos." });
-  }
-
+// Ruta para eliminar un usuario del CRM
+app.delete('/delete-user-alt/:projectId/:userId', async (req, res) => {
+  const { projectId, userId } = req.params;
   try {
-    // Buscar el proyecto correspondiente
     const { data: project, error: projError } = await supabaseAdmin
-      .from("Tproyects")
-      .select("ProyectURL, ProyectServiceRole")
-      .eq("ProyectId", projectId)
+      .from('Tproyects') // Usamos tu tabla central de proyectos 'Tproyects'
+      .select('ProyectURL, ProyectServiceRole')
+      .eq('ProyectId', projectId) // Buscamos el proyecto por ProyectId
       .single();
 
     if (projError || !project) {
-      return res.status(404).json({ error: "Proyecto no encontrado." });
+      return res.status(404).json({ error: 'Proyecto no encontrado' });
     }
 
     const supabase = createClient(project.ProyectURL, project.ProyectServiceRole);
 
-    // Buscar el usuario en Auth
-    const { data: listResult, error: listError } = await supabase.auth.admin.listUsers();
-    if (listError) throw listError;
+    // Eliminar el usuario de tu tabla de usuarios (ej: 'users' o 'TUser')
+    const { error: userDeleteError } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', userId); // Asumiendo que el userId en tu tabla es 'id'
 
-    const user = listResult.users.find(u => u.email === correoElectronico);
-    if (!user) {
-      return res.status(404).json({ error: "Usuario no encontrado en Auth." });
+    if (userDeleteError) {
+      console.error("Error al eliminar usuario de la tabla:", userDeleteError);
+      return res.status(500).json({ error: 'Error al eliminar usuario de la tabla' });
     }
 
-    const userId = user.id;
+    // Eliminar el usuario de la autenticación de Supabase
+    const { error: authDeleteError } = await supabase.auth.admin.deleteUser(userId);
 
-    // Eliminar de tabla de usuarios
-    const { error: dbError } = await supabase
-      .from("users")
-      .delete()
-      .eq("id", userId);
+    if (authDeleteError) {
+      console.error("Error al eliminar usuario de la autenticación:", authDeleteError);
+      return res.status(500).json({ error: 'Error al eliminar usuario de la autenticación' });
+    }
 
-    if (dbError) throw dbError;
-
-    // Eliminar de Auth
-    const { error: authError } = await supabase.auth.admin.deleteUser(userId);
-    if (authError) throw authError;
-
-    res.status(200).json({ message: "Usuario eliminado correctamente." });
-
+    res.sendStatus(204); // Respuesta exitosa sin contenido
   } catch (err) {
-    console.error("❌ Error al eliminar:", err);
+    console.error("Error al eliminar usuario:", err);
     res.status(500).json({ error: err.message });
   }
 });
-
 
 export default app;
 
